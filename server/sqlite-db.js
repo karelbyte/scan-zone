@@ -43,6 +43,14 @@ function cleanString(str) {
     .trim();
 }
 
+function cleanEmail(email) {
+  if (!email) return '';
+  return String(email)
+    .replace(/[\r\n\t]+/g, '')
+    .trim()
+    .toLowerCase();
+}
+
 function extractEmailsFromWebsite(website) {
   if (!website) return { website: '', emails: [] };
   let normalized = String(website).trim();
@@ -60,12 +68,12 @@ function extractEmailsFromWebsite(website) {
   const emails = [];
   const websites = [];
 
-  candidateParts.forEach(part => {
+    candidateParts.forEach(part => {
     const isUrlLike = /^https?:\/\//i.test(part) || /^www\./i.test(part) || part.includes('/') || part.includes('\\');
     const isEmailLike = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(part);
 
     if (isEmailLike && !isUrlLike) {
-      emails.push(cleanString(part));
+      emails.push(cleanEmail(part));
     } else {
       websites.push(part);
     }
@@ -93,8 +101,8 @@ function cleanLeadStrings(lead) {
     rating: cleanString(lead.rating),
     reviews: cleanString(lead.reviews),
     url: cleanString(lead.url),
-    emails: Array.from(new Set([
-      ...(lead.emails || []).map(cleanString).filter(Boolean),
+        emails: Array.from(new Set([
+      ...(lead.emails || []).map(email => cleanEmail(email)).filter(Boolean),
       ...websiteNormalized.emails
     ])),
     socials: lead.socials || {},
@@ -333,7 +341,7 @@ function updateLeadEmails(id, emails) {
   if (!existing) return null;
   const cleanedEmails = Array.from(new Set([
     ...(existing.emails || []),
-    ...emails.map(email => cleanString(email)).filter(Boolean)
+    ...emails.map(email => cleanEmail(email)).filter(Boolean)
   ]));
   db.prepare('UPDATE leads SET emails = ? WHERE id = ?').run(JSON.stringify(cleanedEmails), Number(id));
   return getLeadById(id);
@@ -344,10 +352,10 @@ function updateLeadById(id, updates = {}) {
   const existing = getLeadById(id);
   if (!existing) return null;
 
-  const mergedEmails = Array.from(new Set([
-    ...(existing.emails || []),
-    ...((updates.emails || []).map(email => cleanString(email)).filter(Boolean))
-  ]));
+  // Si se envía emails, reemplazar completamente (sin merge)
+  const mergedEmails = Array.isArray(updates.emails)
+    ? updates.emails.map(e => String(e).trim()).filter(Boolean)
+    : existing.emails || [];
 
   const updatedLead = {
     ...existing,

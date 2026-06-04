@@ -776,6 +776,13 @@ app.post('/api/leads/enqueue-all', (req, res) => {
     return sentDateStr !== todayStr;
   });
 
+  // Ordenar por fecha de escaneo descendente (más nuevos primero)
+  leads.sort((a, b) => {
+    const dateA = a.scannedAt ? new Date(a.scannedAt).getTime() : 0;
+    const dateB = b.scannedAt ? new Date(b.scannedAt).getTime() : 0;
+    return dateB - dateA;
+  });
+
   if (leads.length === 0) {
     return res.status(400).json({ error: 'No hay leads elegibles: todos los que tienen correo ya recibieron un envío hoy.' });
   }
