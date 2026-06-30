@@ -30,6 +30,16 @@ import {
   getEmailQueueStats,
   markLeadEmailSent
 } from './sqlite-db.js';
+import {
+  startAgent,
+  stopAgent,
+  pauseAgent,
+  getAgentStatus,
+  onAgentEvent,
+} from './agent.js';
+import { getJobStats, getProgressByState, getJobs, resetFailedJobs, clearAllJobs, getRecentErrors } from './agent-db.js';
+import { DEFAULT_CATEGORIES } from './agent-config.js';
+import { getStates, getMunicipalities, getTotalMunicipalities } from './geo-data.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -872,6 +882,122 @@ setInterval(() => {
 }, 5000);
 
 processEmailQueue().catch(err => console.error('[Queue] inicio:', err));
+
+// ── Endpoints del Agente Autónomo ─────────────────────────────────────────────
+
+// SSE para eventos del agente en tiempo real
+app.get('/api/agent/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  // Enviar estado actual
+  res.write(`event: status\n`);
+  res.write(`data: ${JSON.stringify(getAgentStatus())}\n\n`);
+
+  // Suscribirse a eventos del agente
+  const unsubscribe = onAgentEvent((payload) => {
+    res.write(`event: ${payload.event}\n`);
+    res.write(`data: ${JSON.stringify(payload.data)}\n\n`);
+  });
+
+  req.on('close', () => {
+    unsubscribe();
+  });
+});
+
+// Obtener estado completo del agente
+app.get('/api/agent/status', (req, res) => {
+  res.json(getAgentStatus());
+});
+
+// Iniciar el agente
+app.post('/api/agent/start', async (req, res) => {
+  const { categories, regenerateJobs } = req.body || {};
+  try {
+    const result = await startAgent({
+      categories: categories || DEFAULT_CATEGORIES,
+      regenerateJobs: regenerateJobs || false,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Detener el agente
+app.post('/api/agent/stop', (req, res) => {
+  const { reason } = req.body || {};
+  const result = stopAgent(reason || 'manual');
+  res.json(result);
+});
+
+// Pausar/reanudar el agente
+app.post('/api/agent/pause', (req, res) => {
+  const result = pauseAgent();
+  res.json(result);
+});
+
+// Obtener estadísticas de jobs
+app.get('/api/agent/jobs/stats', (req, res) => {
+  res.json(getJobStats());
+});
+
+// Obtener progreso por estado
+app.get('/api/agent/jobs/progress', (req, res) => {
+  res.json(getProgressByState());
+});
+
+// Listar jobs con filtros
+app.get('/api/agent/jobs', (req, res) => {
+  const { status, category, state, limit, offset } = req.query;
+  const jobs = getJobs({
+    status,
+    category,
+    state,
+    limit: parseInt(limit) || 50,
+    offset: parseInt(offset) || 0,
+  });
+  res.json(jobs);
+});
+
+// Reintentar jobs fallidos
+app.post('/api/agent/jobs/retry-failed', (req, res) => {
+  const count = resetFailedJobs();
+  res.json({ message: `${count} jobs marcados para reintento.`, count });
+});
+
+// Limpiar todos los jobs (para reconfigurar)
+app.post('/api/agent/jobs/clear', (req, res) => {
+  const status = getAgentStatus();
+  if (status.running) {
+    return res.status(400).json({ error: 'No se puede limpiar mientras el agente está corriendo.' });
+  }
+  clearAllJobs();
+  res.json({ message: 'Todos los jobs eliminados.' });
+});
+
+// Obtener errores recientes
+app.get('/api/agent/errors', (req, res) => {
+  const { limit } = req.query;
+  res.json(getRecentErrors(parseInt(limit) || 20));
+});
+
+// Obtener info geográfica disponible
+app.get('/api/agent/geo', (req, res) => {
+  const states = getStates();
+  res.json({
+    totalStates: states.length,
+    totalMunicipalities: getTotalMunicipalities(),
+    states: states.map(s => ({ name: s, municipalities: getMunicipalities(s).length })),
+  });
+});
+
+// Obtener categorías disponibles
+app.get('/api/agent/categories', (req, res) => {
+  res.json({ categories: DEFAULT_CATEGORIES });
+});
 
 // Enlazar rutas comodín para servir el frontend de React en producción
 app.get('*', (req, res) => {

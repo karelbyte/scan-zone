@@ -130,6 +130,14 @@ export function hasSession() {
  * y usa Visión IA (Gemini o Groq) para extraer los datos de contacto.
  */
 export async function scrapeWithVision(socialUrl) {
+  // Normalizar URL — Google Maps a veces almacena URLs sin protocolo
+  let normalizedUrl = (socialUrl || '').trim();
+  if (normalizedUrl.startsWith('//')) {
+    normalizedUrl = 'https:' + normalizedUrl;
+  } else if (normalizedUrl && !normalizedUrl.startsWith('http://') && !normalizedUrl.startsWith('https://')) {
+    normalizedUrl = 'https://' + normalizedUrl;
+  }
+
   const provider = getProvider();
   let apiKey;
 
@@ -173,7 +181,7 @@ export async function scrapeWithVision(socialUrl) {
     );
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'es-MX,es;q=0.9' });
 
-    await page.goto(socialUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+    await page.goto(normalizedUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
     // Esperar a que cargue contenido
     await new Promise(r => setTimeout(r, 3000));

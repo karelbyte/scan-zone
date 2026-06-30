@@ -36,7 +36,14 @@ import {
   Eye,
   Sparkles,
   PlusCircle,
-  Trash
+  Trash,
+  Bot,
+  Pause,
+  BarChart3,
+  MapPinned,
+  Zap,
+  Clock,
+  Activity
 } from 'lucide-react';
 
 export default function App() {
@@ -134,6 +141,22 @@ export default function App() {
   const [discoveringAll, setDiscoveringAll] = useState(false);
   const [emailQueueStats, setEmailQueueStats] = useState({ pending: 0, processing: 0, sent: 0, failed: 0 });
 
+  // ── Estado del Agente Autónomo ─────────────────────────────────────────────
+  const [agentStatus, setAgentStatus] = useState({
+    running: false,
+    paused: false,
+    currentJob: null,
+    runId: null,
+    jobs: { pending: 0, running: 0, completed: 0, failed: 0, retry: 0, totalJobs: 0, totalLeads: 0, totalWithEmail: 0, totalEmails: 0 },
+    daily: {},
+    currentRun: null,
+    recentErrors: []
+  });
+  const [agentProgress, setAgentProgress] = useState([]);
+  const [agentLogs, setAgentLogs] = useState([]);
+  const [agentStarting, setAgentStarting] = useState(false);
+  const agentLogEndRef = useRef(null);
+
   // Consola de logs
   const [logs, setLogs] = useState([]);
   const logEndRef = useRef(null);
@@ -195,6 +218,78 @@ export default function App() {
     }
   };
 
+  // ── Funciones del Agente Autónomo ──────────────────────────────────────────
+  const fetchAgentStatus = async () => {
+    try {
+      const res = await fetch('/api/agent/status');
+      if (res.ok) {
+        const data = await res.json();
+        setAgentStatus(data);
+      }
+    } catch (err) {
+      console.error('Error cargando estado del agente:', err);
+    }
+  };
+
+  const fetchAgentProgress = async () => {
+    try {
+      const res = await fetch('/api/agent/jobs/progress');
+      if (res.ok) {
+        const data = await res.json();
+        setAgentProgress(data);
+      }
+    } catch {}
+  };
+
+  const handleAgentStart = async (regenerateJobs = false) => {
+    setAgentStarting(true);
+    try {
+      const res = await fetch('/api/agent/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ regenerateJobs })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setAgentLogs(prev => [...prev, { text: `▶ Agente iniciado (Run #${data.runId})`, type: 'success', time: new Date().toLocaleTimeString() }]);
+        fetchAgentStatus();
+      } else {
+        setAgentLogs(prev => [...prev, { text: `❌ ${data.message}`, type: 'error', time: new Date().toLocaleTimeString() }]);
+      }
+    } catch (err) {
+      setAgentLogs(prev => [...prev, { text: `❌ Error de conexión: ${err.message}`, type: 'error', time: new Date().toLocaleTimeString() }]);
+    }
+    setAgentStarting(false);
+  };
+
+  const handleAgentStop = async () => {
+    try {
+      const res = await fetch('/api/agent/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const data = await res.json();
+      setAgentLogs(prev => [...prev, { text: `⏹ ${data.message}`, type: 'info', time: new Date().toLocaleTimeString() }]);
+      setTimeout(fetchAgentStatus, 2000);
+    } catch {}
+  };
+
+  const handleAgentPause = async () => {
+    try {
+      const res = await fetch('/api/agent/pause', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const data = await res.json();
+      setAgentLogs(prev => [...prev, { text: data.paused ? '⏸ Agente pausado' : '▶ Agente reanudado', type: 'info', time: new Date().toLocaleTimeString() }]);
+      fetchAgentStatus();
+    } catch {}
+  };
+
+  const handleAgentRetryFailed = async () => {
+    try {
+      const res = await fetch('/api/agent/jobs/retry-failed', { method: 'POST' });
+      const data = await res.json();
+      setAgentLogs(prev => [...prev, { text: `🔄 ${data.message}`, type: 'info', time: new Date().toLocaleTimeString() }]);
+      fetchAgentStatus();
+      fetchAgentProgress();
+    } catch {}
+  };
+
   const handleOpenSendAllModal = () => {
     setShowSendAllModal(true);
     const defaultTemplate = templates.length > 0 ? templates[0] : null;
@@ -248,9 +343,48 @@ export default function App() {
     fetchConfig();
     fetchTemplates();
     fetchEmailQueueStats();
+    fetchAgentStatus();
+    fetchAgentProgress();
 
     const eventSource = new EventSource('/api/scan/stream');
     const queueInterval = setInterval(fetchEmailQueueStats, 10000);
+    const agentInterval = setInterval(() => { fetchAgentStatus(); fetchAgentProgress(); }, 15000);
+
+    // SSE del agente autónomo
+    const agentSSE = new EventSource('/api/agent/stream');
+    agentSSE.addEventListener('status', () => { fetchAgentStatus(); });
+    const agentEvents = ['job_started', 'job_completed', 'job_failed', 'email_sent', 'started', 'stopped', 'paused', 'resumed', 'daily_limit_reached', 'schedule_pause', 'long_break', 'state_change_pause', 'all_jobs_done', 'too_many_errors', 'jobs_generated', 'email_limit_reached'];
+    agentEvents.forEach(evtName => {
+      agentSSE.addEventListener(evtName, (event) => {
+        const data = JSON.parse(event.data);
+        let text = '';
+        switch (evtName) {
+          case 'job_started': text = `🔍 Buscando: "${data.job?.category}" en ${data.job?.municipality}, ${data.job?.state}`; break;
+          case 'job_completed': text = `✅ Completado: ${data.leadsFound} leads, ${data.leadsWithEmail} con email, ${data.emailsSent} enviados`; break;
+          case 'job_failed': text = `❌ Falló (${data.phase})${data.retrying ? ' — se reintentará' : ''}`; break;
+          case 'email_sent': text = `📧 Email enviado a ${data.to} (${data.lead})`; break;
+          case 'started': text = `▶ Agente iniciado`; break;
+          case 'stopped': text = `⏹ Agente detenido: ${data.reason}`; break;
+          case 'paused': text = `⏸ Agente pausado`; break;
+          case 'resumed': text = `▶ Agente reanudado`; break;
+          case 'daily_limit_reached': text = `🚫 Límite diario alcanzado: ${data.metric}`; break;
+          case 'schedule_pause': text = `🌙 Fuera de horario. Reanuda en ${data.waitMinutes} min`; break;
+          case 'long_break': text = `☕ Descanso de ${Math.round((data.breakMs||0)/1000)}s tras ${data.searchesDone} búsquedas`; break;
+          case 'state_change_pause': text = `🗺️ Cambiando: ${data.from} → ${data.to}`; break;
+          case 'all_jobs_done': text = `🎉 ¡Todos los jobs completados!`; break;
+          case 'too_many_errors': text = `🚨 Demasiados errores hoy. Agente detenido.`; break;
+          case 'jobs_generated': text = `📋 ${data.inserted} jobs generados (total: ${data.total})`; break;
+          case 'email_limit_reached': text = `📧 Límite de emails diarios alcanzado`; break;
+          default: text = `${evtName}: ${JSON.stringify(data)}`;
+        }
+        setAgentLogs(prev => [...prev.slice(-200), { text, type: evtName.includes('fail') || evtName.includes('error') ? 'error' : 'info', time: new Date().toLocaleTimeString() }]);
+        if (['job_completed', 'stopped', 'all_jobs_done'].includes(evtName)) {
+          fetchAgentStatus();
+          fetchAgentProgress();
+        }
+      });
+    });
+    agentSSE.onerror = () => {};
 
     eventSource.addEventListener('status', (event) => {
       const statusData = JSON.parse(event.data);
@@ -305,7 +439,9 @@ export default function App() {
 
     return () => {
       eventSource.close();
+      agentSSE.close();
       clearInterval(queueInterval);
+      clearInterval(agentInterval);
     };
   }, []);
 
@@ -318,6 +454,16 @@ export default function App() {
       }
     }
   }, [logs]);
+
+  // Auto-scroll del log del agente
+  useEffect(() => {
+    if (agentLogEndRef.current) {
+      const container = agentLogEndRef.current.parentElement;
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+      }
+    }
+  }, [agentLogs]);
 
   // Iniciar escaneo
   const handleStartScan = async (e) => {
@@ -1391,6 +1537,23 @@ export default function App() {
           <Mail size={16} />
           Plantillas de Correo
         </button>
+        <button
+          type="button"
+          className={`tab-button ${activeTab === 'agent' ? 'active' : ''}`}
+          onClick={() => { setActiveTab('agent'); fetchAgentStatus(); fetchAgentProgress(); }}
+          style={{ position: 'relative' }}
+        >
+          <Bot size={16} />
+          Agente
+          {agentStatus.running && (
+            <span style={{
+              width: 8, height: 8, borderRadius: '50%',
+              background: agentStatus.paused ? '#f59e0b' : '#22c55e',
+              display: 'inline-block', marginLeft: 6,
+              animation: agentStatus.paused ? 'none' : 'pulse 1.5s infinite'
+            }} />
+          )}
+        </button>
         {activeTab === 'send-email' && sendLead && (
           <button
             type="button"
@@ -2296,6 +2459,184 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {activeTab === 'agent' && (
+        <section className="card" style={{ padding: '1.5rem' }}>
+          {/* Header del Agente */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem', paddingBottom: '1rem', borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <Bot size={24} style={{ color: 'var(--accent-primary)' }} />
+              <div>
+                <h2 style={{ margin: 0, fontSize: '1.25rem' }}>Agente Autónomo</h2>
+                <p style={{ margin: '0.2rem 0 0', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                  Escaneo automatizado estado por estado, municipio por municipio
+                </p>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              {agentStatus.running ? (
+                <>
+                  <button className="btn btn-secondary" onClick={handleAgentPause} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
+                    {agentStatus.paused ? <Play size={14} /> : <Pause size={14} />}
+                    {agentStatus.paused ? 'Reanudar' : 'Pausar'}
+                  </button>
+                  <button className="btn btn-secondary" onClick={handleAgentStop} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: '#ef4444' }}>
+                    <Square size={14} />
+                    Detener
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button className="btn btn-primary" onClick={() => handleAgentStart(false)} disabled={agentStarting} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
+                    {agentStarting ? <Loader2 size={14} className="animate-spin-slow" /> : <Play size={14} />}
+                    {agentStatus.jobs.totalJobs > 0 ? 'Continuar' : 'Iniciar'}
+                  </button>
+                  <button className="btn btn-secondary" onClick={() => handleAgentStart(true)} disabled={agentStarting} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }} title="Regenerar cola de jobs">
+                    <RefreshCw size={14} />
+                    Reiniciar Cola
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Status Badge */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.25rem', padding: '0.75rem 1rem', borderRadius: '8px', background: agentStatus.running ? (agentStatus.paused ? 'rgba(245,158,11,0.1)' : 'rgba(34,197,94,0.1)') : 'rgba(100,116,139,0.1)', border: `1px solid ${agentStatus.running ? (agentStatus.paused ? 'rgba(245,158,11,0.3)' : 'rgba(34,197,94,0.3)') : 'rgba(100,116,139,0.2)'}` }}>
+            <Activity size={16} style={{ color: agentStatus.running ? (agentStatus.paused ? '#f59e0b' : '#22c55e') : '#64748b' }} />
+            <span style={{ fontSize: '0.85rem', fontWeight: 500, color: agentStatus.running ? (agentStatus.paused ? '#f59e0b' : '#22c55e') : '#64748b' }}>
+              {agentStatus.running ? (agentStatus.paused ? 'Pausado' : 'Ejecutando') : 'Detenido'}
+            </span>
+            {agentStatus.currentJob && (
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginLeft: '0.5rem' }}>
+                — Buscando "{agentStatus.currentJob.category}" en {agentStatus.currentJob.municipality}, {agentStatus.currentJob.state}
+              </span>
+            )}
+          </div>
+
+          {/* Stats Cards */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem', marginBottom: '1.5rem' }}>
+            <div style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)', borderRadius: '10px', padding: '1rem', textAlign: 'center' }}>
+              <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#6366f1' }}>{agentStatus.jobs.totalJobs}</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>Total Jobs</div>
+            </div>
+            <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: '10px', padding: '1rem', textAlign: 'center' }}>
+              <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#22c55e' }}>{agentStatus.jobs.completed}</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>Completados</div>
+            </div>
+            <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: '10px', padding: '1rem', textAlign: 'center' }}>
+              <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#f59e0b' }}>{agentStatus.jobs.pending + agentStatus.jobs.retry}</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>Pendientes</div>
+            </div>
+            <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '10px', padding: '1rem', textAlign: 'center' }}>
+              <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#ef4444' }}>{agentStatus.jobs.failed}</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>Fallidos</div>
+            </div>
+            <div style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: '10px', padding: '1rem', textAlign: 'center' }}>
+              <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#3b82f6' }}>{agentStatus.jobs.totalLeads}</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>Leads Encontrados</div>
+            </div>
+            <div style={{ background: 'rgba(168,85,247,0.08)', border: '1px solid rgba(168,85,247,0.2)', borderRadius: '10px', padding: '1rem', textAlign: 'center' }}>
+              <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#a855f7' }}>{agentStatus.jobs.totalEmails}</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>Emails Enviados</div>
+            </div>
+          </div>
+
+          {/* Daily Stats */}
+          {Object.keys(agentStatus.daily).length > 0 && (
+            <div style={{ marginBottom: '1.5rem', padding: '1rem', background: 'rgba(255,255,255,0.02)', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.06)' }}>
+              <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)' }}>
+                <Clock size={14} /> Actividad de Hoy
+              </h3>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem' }}>
+                {agentStatus.daily.searches != null && <span style={{ fontSize: '0.8rem' }}>🔍 Búsquedas: <strong>{agentStatus.daily.searches}/150</strong></span>}
+                {agentStatus.daily.emails_sent != null && <span style={{ fontSize: '0.8rem' }}>📧 Emails: <strong>{agentStatus.daily.emails_sent}/80</strong></span>}
+                {agentStatus.daily.crawls != null && <span style={{ fontSize: '0.8rem' }}>🌐 Crawls: <strong>{agentStatus.daily.crawls}/500</strong></span>}
+                {agentStatus.daily.vision_calls != null && <span style={{ fontSize: '0.8rem' }}>📸 Vision: <strong>{agentStatus.daily.vision_calls}/100</strong></span>}
+                {agentStatus.daily.errors != null && <span style={{ fontSize: '0.8rem', color: '#ef4444' }}>❌ Errores: <strong>{agentStatus.daily.errors}/30</strong></span>}
+              </div>
+            </div>
+          )}
+
+          {/* Progress by State */}
+          {agentProgress.length > 0 && (
+            <div style={{ marginBottom: '1.5rem' }}>
+              <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)' }}>
+                <MapPinned size={14} /> Progreso por Estado
+              </h3>
+              <div style={{ maxHeight: '250px', overflowY: 'auto', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                {agentProgress.map(item => {
+                  const pct = item.total > 0 ? Math.round((item.completed / item.total) * 100) : 0;
+                  return (
+                    <div key={item.state} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.5rem 0.75rem', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                      <span style={{ fontSize: '0.8rem', minWidth: '140px', color: 'var(--text-primary)' }}>{item.state}</span>
+                      <div style={{ flex: 1, height: 6, background: 'rgba(255,255,255,0.06)', borderRadius: 3, overflow: 'hidden' }}>
+                        <div style={{ width: `${pct}%`, height: '100%', background: pct === 100 ? '#22c55e' : '#6366f1', borderRadius: 3, transition: 'width 0.3s' }} />
+                      </div>
+                      <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', minWidth: '60px', textAlign: 'right' }}>
+                        {item.completed}/{item.total}
+                      </span>
+                      {item.failed > 0 && <span style={{ fontSize: '0.7rem', color: '#ef4444' }}>({item.failed} err)</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Failed jobs retry button */}
+          {agentStatus.jobs.failed > 0 && !agentStatus.running && (
+            <div style={{ marginBottom: '1.5rem', padding: '0.75rem 1rem', background: 'rgba(239,68,68,0.08)', borderRadius: '8px', border: '1px solid rgba(239,68,68,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: '0.85rem', color: '#ef4444' }}>
+                <AlertTriangle size={14} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />
+                {agentStatus.jobs.failed} jobs fallidos
+              </span>
+              <button className="btn btn-secondary" onClick={handleAgentRetryFailed} style={{ fontSize: '0.8rem', padding: '0.4rem 0.8rem' }}>
+                <RefreshCw size={12} style={{ marginRight: '0.3rem' }} />
+                Reintentar
+              </button>
+            </div>
+          )}
+
+          {/* Recent Errors */}
+          {agentStatus.recentErrors && agentStatus.recentErrors.length > 0 && (
+            <div style={{ marginBottom: '1.5rem' }}>
+              <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#ef4444' }}>
+                <AlertTriangle size={14} /> Errores Recientes
+              </h3>
+              <div style={{ maxHeight: '150px', overflowY: 'auto', borderRadius: '8px', border: '1px solid rgba(239,68,68,0.15)', background: 'rgba(239,68,68,0.03)' }}>
+                {agentStatus.recentErrors.map((err, i) => (
+                  <div key={i} style={{ padding: '0.5rem 0.75rem', borderBottom: '1px solid rgba(239,68,68,0.08)', fontSize: '0.75rem' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>[{err.phase}]</span>{' '}
+                    <span style={{ color: '#ef4444' }}>{err.message}</span>
+                    {err.municipality && <span style={{ color: 'var(--text-muted)', marginLeft: '0.5rem' }}>— {err.municipality}, {err.state}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Agent Logs */}
+          <div>
+            <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)' }}>
+              <Zap size={14} /> Actividad en Tiempo Real
+            </h3>
+            <div style={{ height: '220px', overflowY: 'auto', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', padding: '0.75rem', fontFamily: 'monospace', fontSize: '0.75rem', lineHeight: '1.6', border: '1px solid rgba(255,255,255,0.06)' }}>
+              {agentLogs.length === 0 && (
+                <p style={{ color: 'var(--text-muted)', textAlign: 'center', marginTop: '2rem' }}>
+                  Inicia el agente para ver la actividad aquí...
+                </p>
+              )}
+              {agentLogs.map((log, i) => (
+                <div key={i} style={{ color: log.type === 'error' ? '#ef4444' : 'var(--text-secondary)' }}>
+                  <span style={{ color: 'var(--text-muted)', marginRight: '0.5rem' }}>{log.time}</span>
+                  {log.text}
+                </div>
+              ))}
+              <div ref={agentLogEndRef} />
+            </div>
+          </div>
+        </section>
       )}
 
       {activeTab === 'send-email' && sendLead && (
